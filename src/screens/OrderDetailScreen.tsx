@@ -21,7 +21,10 @@ const JOURNEY_STEPS: { status: string; label: string; icon: keyof typeof Ionicon
   { status: 'delivered', label: 'تم التسليم', icon: 'checkmark-done-outline', getTime: (o) => o.deliveredAt || o.closedAt },
 ];
 
-const JOURNEY_ORDER = ['new', 'preparing', 'readyForPickup', 'assigned', 'pickedUp', 'onTheWay', 'delivered', 'closed'];
+// يجب أن تحتوي كل حالة يمرّ بها الطلب: أي حالة ناقصة (كانت 'accepted' ناقصة) تجعل indexOf يرجع ‎-1
+// فتظهر كل المراحل "لم يصل بعد" لحظة قبول السائق للطلب.
+const JOURNEY_ORDER = ['new', 'preparing', 'readyForPickup', 'assigned', 'accepted', 'pickedUp', 'onTheWay', 'delivered', 'closed'];
+const WITH_COURIER_STATUSES = ['pickedUp', 'onTheWay'];
 
 type Props = {
   order: Order;
@@ -81,6 +84,7 @@ export default function OrderDetailScreen({ order, token, onBack, onMarkReady, o
 
   const canMarkReady = order.status === 'preparing';
   const canCancel = !TERMINAL_STATUSES.includes(order.status);
+  const cancelAfterPickup = WITH_COURIER_STATUSES.includes(order.status);
   const hasIssue = ISSUE_STATUSES.includes(order.status);
   const currentStepIndex = JOURNEY_ORDER.indexOf(order.status);
   const total = order.mealAmount + order.deliveryFee;
@@ -334,6 +338,11 @@ export default function OrderDetailScreen({ order, token, onBack, onMarkReady, o
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>سبب إلغاء الطلب</Text>
+            {cancelAfterPickup ? (
+              <Text style={styles.cancelWarning}>
+                تنبيه: السائق استلم هذا الطلب من المتجر وهو الآن معه. تواصل معه قبل الإلغاء حتى لا يكمل التوصيل.
+              </Text>
+            ) : null}
             <TextInput
               style={styles.modalInput}
               placeholder="اكتب سبب الإلغاء (اختياري)"
@@ -413,6 +422,7 @@ export default function OrderDetailScreen({ order, token, onBack, onMarkReady, o
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   content: { paddingBottom: 40 },
+  cancelWarning: { color: colors.danger, backgroundColor: colors.dangerBg, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.sm, fontSize: 12.5, fontWeight: '700', textAlign: 'right', lineHeight: 19 },
   header: { flexDirection: 'row-reverse', alignItems: 'center', justifyContent: 'space-between', paddingTop: 56, paddingHorizontal: 20, paddingBottom: 14 },
   backButton: { flexDirection: 'row-reverse', alignItems: 'center', width: 60 },
   backText: { color: colors.primary, fontWeight: '800', fontSize: 15 },

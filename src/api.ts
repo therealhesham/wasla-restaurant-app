@@ -284,10 +284,12 @@ export type CreateOrderInput = {
   locationMethod?: 'map-picker' | 'map-link' | 'manual';
 };
 
-export async function createOrder(token: string, input: CreateOrderInput) {
+// restaurantName مطلوب في جسم الطلب، فنرسل اسم المتجر الحقيقي بدل نص وهمي — حتى لو اعتمد الخادم
+// على القيمة المرسلة لا يظهر للسائق اسم متجر خاطئ.
+export async function createOrder(token: string, input: CreateOrderInput, restaurantName: string) {
   return request<Order>('/mobile/restaurant/orders', {
     method: 'POST',
-    body: JSON.stringify({ ...input, restaurantName: 'placeholder' }),
+    body: JSON.stringify({ ...input, restaurantName }),
   }, token);
 }
 

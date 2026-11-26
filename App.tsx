@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, AppState, StyleSheet, View } from 'react-native';
 
 import {
+  ApiError,
   cancelOrder as apiCancelOrder,
   clearToken,
   createOrder,
@@ -20,7 +21,7 @@ import {
 } from './src/api';
 import type { CreateOrderInput, Order, PendingSettlement, Restaurant, SettlementRecord } from './src/api';
 import { colors } from './src/theme';
-import { getPushToken } from './src/pushNotifications';
+import { getPushToken, subscribeToPushActivity } from './src/pushNotifications';
 
 import LoginScreen from './src/screens/LoginScreen';
 import OnboardingScreen from './src/screens/OnboardingScreen';
@@ -38,6 +39,11 @@ import TabBar, { TabKey } from './src/components/TabBar';
 
 type OverlayScreen = 'create' | 'detail' | 'success' | 'profile' | 'support' | 'analytics' | null;
 
+// حالة الطلب تتغير من جهة السائق والإدارة (إسناد، قبول، استلام، تسليم)، فتُسحب الطلبات دوريًا وعلى
+// كل الشاشات. البيانات المالية والحساب أقل استعجالًا فتُسحب على فترة أطول.
+const ORDERS_POLL_MS = 10000;
+const ACCOUNT_POLL_MS = 60000;
+
 export default function App() {
   const [booting, setBooting] = useState(true);
   const [onboardingSeen, setOnboardingSeen] = useState(true);
@@ -52,12 +58,39 @@ export default function App() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [lastCreatedOrder, setLastCreatedOrder] = useState<Order | null>(null);
 
+  // نسخ مرجعية من الحالة تُقرأ داخل دوال السحب الدوري دون إعادة إنشائها مع كل تغيّر.
+  const selectedOrderRef = useRef<Order | null>(null);
+  const overlayRef = useRef<OverlayScreen>(null);
+  selectedOrderRef.current = selectedOrder;
+  overlayRef.current = overlay;
+
+  // رقم تسلسلي لكل سحب للطلبات: أي رد قديم يصل بعد تعديل محلي أحدث منه يُهمل بدل ما يكتب فوقه.
+  const ordersSeq = useRef(0);
+  const ordersRefreshBusy = useRef(false);
+
   const loadOrders = useCallback(async (activeToken: string) => {
+    const seq = ++ordersSeq.current;
     const result = await fetchOrders(activeToken);
+    if (seq !== ordersSeq.current) return;
     setOrders(result);
+
+    // شاشة تفاصيل الطلب وشاشة "تم إنشاء الطلب" تعرضان نسخة من الطلب، فتُحدَّثان هنا مع كل سحب —
+    // بدون ذلك تبقى الشاشة على "بانتظار إسناد سائق" مهما تغيّر الطلب فعليًا.
+    setLastCreatedOrder((current) => (current ? result.find((item) => item.id === current.id) ?? current : current));
+    const selected = selectedOrderRef.current;
+    if (selected) {
+      const fresh = result.find((item) => item.id === selected.id);
+      if (fresh) {
+        setSelectedOrder(fresh);
+      } else if (overlayRef.current === 'detail') {
+        setOverlay(null);
+        setSelectedOrder(null);
+        Alert.alert('الطلب لم يعد موجودًا', `الطلب ${selected.orderNumber || selected.id} حُذف من النظام.`);
+      }
+    }
   }, []);
 
-  const loadEverything = useCallback(async (activeToken: string) => {
+  const loadAccount = useCallback(async (activeToken: string) => {
     const [me, settlement, history] = await Promise.all([
       fetchMe(activeToken),
       fetchPendingSettlement(activeToken),
@@ -66,8 +99,77 @@ export default function App() {
     setRestaurant(me);
     setPendingSettlement(settlement);
     setSettlementHistory(history);
+  }, []);
+
+  const loadEverything = useCallback(async (activeToken: string) => {
+    await loadAccount(activeToken);
     await loadOrders(activeToken);
-  }, [loadOrders]);
+  }, [loadAccount, loadOrders]);
+
+  const performLogout = useCallback(async () => {
+    await clearToken();
+    ordersSeq.current += 1;
+    setToken(null);
+    setRestaurant(null);
+    setOrders([]);
+    setPendingSettlement(null);
+    setSettlementHistory([]);
+    setSelectedOrder(null);
+    setLastCreatedOrder(null);
+    setActiveTab('home');
+    setOverlay(null);
+  }, []);
+
+  // أخطاء السحب الدوري العابرة تُتجاهل وتبقى آخر بيانات محمّلة، إلا انتهاء/إلغاء الجلسة (401):
+  // بدون هذا يبقى المتجر "داخلًا" على بيانات قديمة للأبد.
+  const handleRefreshError = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.status === 401) {
+      performLogout().then(() => {
+        Alert.alert('انتهت الجلسة', 'يرجى تسجيل الدخول من جديد.');
+      });
+    }
+  }, [performLogout]);
+
+  const refreshOrdersNow = useCallback(() => {
+    if (!token || ordersRefreshBusy.current) return;
+    ordersRefreshBusy.current = true;
+    loadOrders(token)
+      .catch(handleRefreshError)
+      .finally(() => {
+        ordersRefreshBusy.current = false;
+      });
+  }, [token, loadOrders, handleRefreshError]);
+
+  useEffect(() => {
+    if (!token) return;
+    const interval = setInterval(() => {
+      if (AppState.currentState === 'active') refreshOrdersNow();
+    }, ORDERS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [token, refreshOrdersNow]);
+
+  useEffect(() => {
+    if (!token) return;
+    const interval = setInterval(() => {
+      if (AppState.currentState === 'active') loadAccount(token).catch(handleRefreshError);
+    }, ACCOUNT_POLL_MS);
+    return () => clearInterval(interval);
+  }, [token, loadAccount, handleRefreshError]);
+
+  // تحديث فوري كل مرة يرجع فيها التطبيق من الخلفية.
+  useEffect(() => {
+    if (!token) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') loadEverything(token).catch(handleRefreshError);
+    });
+    return () => subscription.remove();
+  }, [token, loadEverything, handleRefreshError]);
+
+  // أي إشعار يصل والتطبيق مفتوح (أو يُضغط عليه) يحدّث الطلبات فورًا بدل انتظار السحب التالي.
+  useEffect(() => {
+    if (!token) return;
+    return subscribeToPushActivity(refreshOrdersNow);
+  }, [token, refreshOrdersNow]);
 
   useEffect(() => {
     (async () => {
@@ -116,17 +218,6 @@ export default function App() {
     }
   };
 
-  const performLogout = async () => {
-    await clearToken();
-    setToken(null);
-    setRestaurant(null);
-    setOrders([]);
-    setPendingSettlement(null);
-    setSettlementHistory([]);
-    setActiveTab('home');
-    setOverlay(null);
-  };
-
   const handleLogout = () => {
     Alert.alert(
       'تسجيل الخروج',
@@ -143,22 +234,25 @@ export default function App() {
     setRefreshing(true);
     try {
       await loadEverything(token);
-    } catch {
+    } catch (err) {
       // تجاهل أخطاء التحديث العابرة، تبقى آخر بيانات محمّلة
+      handleRefreshError(err);
     } finally {
       setRefreshing(false);
     }
   };
 
   const handleCreateOrder = async (input: CreateOrderInput) => {
-    if (!token) return;
-    const created = await createOrder(token, input);
-    setOrders((current) => [created, ...current]);
+    if (!token || !restaurant) return;
+    const created = await createOrder(token, input, restaurant.name);
+    ordersSeq.current += 1;
+    setOrders((current) => [created, ...current.filter((item) => item.id !== created.id)]);
     setLastCreatedOrder(created);
     setOverlay('success');
   };
 
   const applyOrderUpdate = (updated: Order) => {
+    ordersSeq.current += 1;
     setOrders((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     setSelectedOrder((current) => (current && current.id === updated.id ? updated : current));
   };

@@ -15,9 +15,10 @@ Notifications.setNotificationHandler({
 // بدل ما نكسر تدفق تسجيل الدخول، لأن الإشعارات ميزة إضافية وليست حرجة لعمل التطبيق.
 export async function getPushToken(): Promise<string | null> {
   if (Platform.OS === 'android') {
+    // أعلى أهمية حتى يظهر إشعار تحديث الطلب منبثقًا مع صوت بدل ما ينزل بالدرج بصمت.
     await Notifications.setNotificationChannelAsync('default', {
       name: 'default',
-      importance: Notifications.AndroidImportance.DEFAULT,
+      importance: Notifications.AndroidImportance.MAX,
     });
   }
 
@@ -38,4 +39,15 @@ export async function getPushToken(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+// يستدعي onActivity كلما وصل إشعار والتطبيق مفتوح، أو ضغط المستخدم على إشعار — حتى تُحدَّث الطلبات
+// فورًا بدل انتظار دورة السحب التالية. يعيد دالة لإلغاء الاشتراك.
+export function subscribeToPushActivity(onActivity: () => void): () => void {
+  const received = Notifications.addNotificationReceivedListener(() => onActivity());
+  const responded = Notifications.addNotificationResponseReceivedListener(() => onActivity());
+  return () => {
+    received.remove();
+    responded.remove();
+  };
 }
