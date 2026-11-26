@@ -58,7 +58,13 @@ export default function CreateOrderScreen({ restaurant, token, onBack, onSubmit 
 
   const [locationStatus, setLocationStatus] = useState<'idle' | 'sending' | 'waiting' | 'confirmed' | 'error'>('idle');
   const [locationCoords, setLocationCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  // مصدر الإحداثيات الحالية: 'link' = العميل شارك موقعه عبر الرابط لهذا الطلب، 'saved' = موقع محفوظ
+  // من طلب سابق لنفس رقم الجوال. الموقع المحفوظ يخص رقمًا بعينه ويجب أن يُمسح إذا تغيّر الرقم.
+  const [locationSource, setLocationSource] = useState<'link' | 'saved' | null>(null);
+  const locationSourceRef = useRef<'link' | 'saved' | null>(null);
+  locationSourceRef.current = locationSource;
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const locationRequestSeq = useRef(0);
 
   // معاينة حية لرسوم التوصيل عند سياسة "حسب المسافة" — تُحسب بمجرد ما يتوفر موقع العميل وقيمة
   // الوجبة، حتى يشوف المطعم الرقم الفعلي قبل تأكيد الطلب لا بعده.
@@ -111,45 +117,83 @@ export default function CreateOrderScreen({ restaurant, token, onBack, onSubmit 
 
   useEffect(() => stopPolling, []);
 
-  // تعبئة تلقائية لبيانات عميل سابق بمجرد إدخال رقم جوال مطابق لطلب سابق لنفس المطعم — قابلة للتعديل بعدها بحرية.
+  // تعبئة تلقائية لبيانات عميل سابق بمجرد إدخال رقم جوال مطابق لطلب سابق لنفس المتجر — قابلة للتعديل بعدها بحرية.
   const [customerFound, setCustomerFound] = useState(false);
   const lookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lookupSeq = useRef(0);
+  // ما عبّأه آخر بحث ناجح — حتى نمسح عند تغيّر الرقم ما لم يعدّله المتجر بيده فقط.
+  const autofilled = useRef<{ customerName: string; area: string; address: string; mapLink: string } | null>(null);
+
+  // بيانات العميل السابق (وخاصة إحداثياته ورابط خريطته غير الظاهرَين بوضوح) لا يجوز أن تبقى بعد
+  // تغيير رقم الجوال، وإلا يُنشأ طلب العميل الجديد على موقع العميل القديم ويذهب السائق للعنوان الخطأ.
+  const clearAutofill = () => {
+    const filled = autofilled.current;
+    autofilled.current = null;
+    setCustomerFound(false);
+    if (filled) {
+      setCustomerName((current) => (current === filled.customerName ? '' : current));
+      setArea((current) => (current === filled.area ? restaurant.city || '' : current));
+      setAddress((current) => (current === filled.address ? '' : current));
+      setMapLink((current) => (current === filled.mapLink ? '' : current));
+    }
+    if (locationSourceRef.current === 'saved') {
+      setLocationCoords(null);
+      setLocationSource(null);
+      setLocationStatus('idle');
+    }
+  };
 
   useEffect(() => {
     if (lookupTimer.current) clearTimeout(lookupTimer.current);
+    // أي بحث سابق ما زال بالطريق يخص رقمًا قديمًا — رقمه التسلسلي يصبح غير صالح فيُهمل رده.
+    const seq = ++lookupSeq.current;
+    clearAutofill();
+
     const digits = phone.replace(/\D/g, '');
-    if (digits.length < 8) {
-      setCustomerFound(false);
-      return;
-    }
+    if (digits.length < 8) return;
 
     lookupTimer.current = setTimeout(async () => {
       try {
         const result = await lookupCustomerByPhone(token, phone);
-        if (result) {
-          setCustomerName(result.customerName);
-          setArea(result.area);
-          setAddress(result.address);
-          if (result.mapLink) setMapLink(result.mapLink);
-          if (typeof result.customerLatitude === 'number' && typeof result.customerLongitude === 'number') {
-            setLocationCoords({ latitude: result.customerLatitude, longitude: result.customerLongitude });
-            setLocationStatus('confirmed');
-          }
-          setCustomerFound(true);
-        } else {
-          setCustomerFound(false);
+        if (seq !== lookupSeq.current || !result) return;
+
+        const filled = {
+          customerName: result.customerName,
+          area: result.area,
+          address: result.address,
+          mapLink: result.mapLink || '',
+        };
+        autofilled.current = filled;
+        setCustomerName(filled.customerName);
+        setArea(filled.area);
+        setAddress(filled.address);
+        if (filled.mapLink) setMapLink(filled.mapLink);
+        // موقع أكّده العميل عبر الرابط لهذا الطلب أحدث من أي موقع محفوظ، فلا نكتب فوقه.
+        if (
+          locationSourceRef.current !== 'link' &&
+          typeof result.customerLatitude === 'number' &&
+          typeof result.customerLongitude === 'number'
+        ) {
+          setLocationCoords({ latitude: result.customerLatitude, longitude: result.customerLongitude });
+          setLocationSource('saved');
+          setLocationStatus('confirmed');
         }
+        setCustomerFound(true);
       } catch {
-        // تجاهل فشل البحث بصمت، المطعم يقدر يعبّي البيانات يدويًا كالمعتاد
+        // تجاهل فشل البحث بصمت، المتجر يقدر يعبّي البيانات يدويًا كالمعتاد
       }
     }, 600);
 
     return () => {
       if (lookupTimer.current) clearTimeout(lookupTimer.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phone, token]);
 
   const requestCustomerLocation = async () => {
+    // إيقاف أي انتظار لطلب موقع سابق — وإلا يبقى يعمل بالخلفية وقد يكتب موقع الطلب القديم فوق الجديد.
+    stopPolling();
+    const requestSeq = ++locationRequestSeq.current;
     setLocationStatus('sending');
     try {
       const { token: requestToken, shareUrl } = await createLocationRequest(token);
@@ -161,15 +205,18 @@ export default function CreateOrderScreen({ restaurant, token, onBack, onSubmit 
         attempts += 1;
         try {
           const result = await pollLocationRequest(token, requestToken);
+          if (requestSeq !== locationRequestSeq.current) return;
           if (result.status === 'resolved' && result.latitude && result.longitude) {
             stopPolling();
             setLocationCoords({ latitude: result.latitude, longitude: result.longitude });
+            setLocationSource('link');
             setLocationStatus('confirmed');
           } else if (attempts > 60) {
             stopPolling();
             setLocationStatus('error');
           }
         } catch {
+          if (requestSeq !== locationRequestSeq.current) return;
           stopPolling();
           setLocationStatus('error');
         }
@@ -246,10 +293,12 @@ export default function CreateOrderScreen({ restaurant, token, onBack, onSubmit 
             <View style={styles.locationConfirmed}>
               <View style={styles.locationConfirmedRow}>
                 <Ionicons name="checkmark-circle" size={16} color={colors.success} />
-                <Text style={styles.locationConfirmedText}>تم تأكيد موقع العميل عبر الرابط</Text>
+                <Text style={styles.locationConfirmedText}>
+                  {locationSource === 'saved' ? 'موقع محفوظ من طلب سابق لهذا العميل' : 'تم تأكيد موقع العميل عبر الرابط'}
+                </Text>
               </View>
               <TouchableOpacity onPress={requestCustomerLocation}>
-                <Text style={styles.locationRetry}>إعادة الطلب</Text>
+                <Text style={styles.locationRetry}>{locationSource === 'saved' ? 'طلب موقع جديد' : 'إعادة الطلب'}</Text>
               </TouchableOpacity>
             </View>
           ) : locationStatus === 'waiting' ? (
