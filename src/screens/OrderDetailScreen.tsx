@@ -82,7 +82,9 @@ export default function OrderDetailScreen({ order, token, onBack, onMarkReady, o
   const [ratingSubmitting, setRatingSubmitting] = useState(false);
   const [ratingError, setRatingError] = useState('');
 
-  const canMarkReady = order.status === 'preparing';
+  // السائق غالبًا يقبل الطلب قبل جاهزيته (الإسناد يتم عند الإنشاء)، فيبقى زر "جاهز" متاحًا حتى
+  // الاستلام ما دام المتجر لم يعلّم الطلب جاهزًا بعد (يتطلب نسخة السيرفر المحدّثة).
+  const canMarkReady = !order.readyForPickupAt && ['preparing', 'assigned', 'accepted'].includes(order.status);
   const canCancel = !TERMINAL_STATUSES.includes(order.status);
   const cancelAfterPickup = WITH_COURIER_STATUSES.includes(order.status);
   const hasIssue = ISSUE_STATUSES.includes(order.status);
